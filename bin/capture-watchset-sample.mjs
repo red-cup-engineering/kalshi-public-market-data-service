@@ -15,7 +15,8 @@ const get = (name, fallback = null) => {
 
 const configured = resolveSportsCaptureConfig();
 const root = get("root", configured.root);
-const watchsetFile = get("watchset", "/var/lib/kalshi-sports-research/watchset/current.json");
+const watchsetFile = get("watchset", process.env.KALSHI_SPORTS_WATCHSET_PATH);
+if (!watchsetFile) throw new TypeError("kalshi-watchset-path-required");
 const maxAgeMs = Number(get("max-age-ms", "120000"));
 const concurrency = Number(get("concurrency", process.env.KALSHI_SPORTS_SAMPLE_CONCURRENCY ?? "2"));
 const sampledAt = new Date().toISOString();

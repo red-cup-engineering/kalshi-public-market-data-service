@@ -17,7 +17,8 @@ const get = (name, fallback = null) => {
 
 const configured = resolveSportsCaptureConfig();
 const root = get("root", configured.root);
-const watchsetFile = get("watchset", "/var/lib/kalshi-sports-research/watchset/current.json");
+const watchsetFile = get("watchset", process.env.KALSHI_SPORTS_WATCHSET_PATH);
+if (!watchsetFile) throw new TypeError("kalshi-watchset-path-required");
 const maxAgeMs = Number(get("max-age-ms", "360000"));
 
 if (!Number.isInteger(maxAgeMs) || maxAgeMs < 1000) {

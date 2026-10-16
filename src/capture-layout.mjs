@@ -1,7 +1,7 @@
 import { join } from "node:path";
 
 export function resolveSportsCaptureConfig(env = process.env) {
-  const root = env.KALSHI_SPORTS_TAPE_ROOT || "/var/lib/kalshi-sports-research/tapes";
+  const root = env.KALSHI_SPORTS_TAPE_ROOT;
   const maxMarkets = Number(env.KALSHI_SPORTS_MAX_MARKETS || "12");
   const maxMilestones = Number(env.KALSHI_SPORTS_MAX_MILESTONES || "6");
 

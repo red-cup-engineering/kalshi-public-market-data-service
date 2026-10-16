@@ -17,7 +17,8 @@ const get = (name, fallback = null) => {
 
 const configured = resolveSportsCaptureConfig();
 const root = get("root", configured.root);
-const watchsetOut = get("watchset-out", "/var/lib/kalshi-sports-research/watchset/current.json");
+const watchsetOut = get("watchset-out", process.env.KALSHI_SPORTS_WATCHSET_PATH);
+if (!watchsetOut) throw new TypeError("kalshi-watchset-path-required");
 const at = get("at", new Date().toISOString());
 const maxMarkets = Number(get("max-markets", String(configured.maxMarkets)));
 const maxMilestones = Number(get("max-milestones", String(configured.maxMilestones)));

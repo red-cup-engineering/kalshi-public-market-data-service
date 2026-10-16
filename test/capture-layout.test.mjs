@@ -6,9 +6,10 @@ import {
   resolveSportsCaptureConfig,
 } from "../src/capture-layout.mjs";
 
-test("capture defaults are conservative and persistent-host oriented", () => {
-  const config = resolveSportsCaptureConfig({});
-  assert.equal(config.root, "/var/lib/kalshi-sports-research/tapes");
+test("the consuming Operations instance must supply the tape root", () => {
+  assert.throws(() => resolveSportsCaptureConfig({}), /sports-tape-root-required/);
+  const config = resolveSportsCaptureConfig({ KALSHI_SPORTS_TAPE_ROOT: "/tmp/tape" });
+  assert.equal(config.root, "/tmp/tape");
   assert.equal(config.maxMarkets, 12);
   assert.equal(config.maxMilestones, 6);
 });
@@ -26,11 +27,11 @@ test("daily tape path rotates on UTC date boundaries deterministically", () => {
 
 test("capture bounds refuse accidental fan-out", () => {
   assert.throws(
-    () => resolveSportsCaptureConfig({ KALSHI_SPORTS_MAX_MARKETS: "101" }),
+    () => resolveSportsCaptureConfig({ KALSHI_SPORTS_TAPE_ROOT: "/tmp/tape", KALSHI_SPORTS_MAX_MARKETS: "101" }),
     /invalid-sports-market-bound/,
   );
   assert.throws(
-    () => resolveSportsCaptureConfig({ KALSHI_SPORTS_MAX_MILESTONES: "51" }),
+    () => resolveSportsCaptureConfig({ KALSHI_SPORTS_TAPE_ROOT: "/tmp/tape", KALSHI_SPORTS_MAX_MILESTONES: "51" }),
     /invalid-sports-milestone-bound/,
   );
 });
