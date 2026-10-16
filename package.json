@@ -1,17 +1,18 @@
 {
   "name": "@red-cup-engineering/kalshi-public-market-data-service",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "private": true,
   "type": "module",
-  "description": "Red Cup Financial Engineering market-data provider: bounded credential-free Kalshi public acquisition, event/milestone observation, sourced tapes and native original regression corpus.",
+  "description": "Red Cup Financial Engineering market-data supplier; Kalshi bounded public API, historical candlesticks, joint-observability and source-latency sentries, milestone-first capture, evidence-tape and audit.",
   "exports": {
     ".": "./src/public-market-data.mjs",
     "./research-tape": "./src/research-tape.mjs",
     "./capture-layout": "./src/capture-layout.mjs",
-    "./tape-audit": "./src/tape-audit.mjs"
+    "./tape-audit": "./src/tape-audit.mjs",
+    "./watchset-sample-phases": "./src/watchset-sample-phases.mjs"
   },
   "scripts": {
-    "check": "node --check src/public-market-data.mjs && node --check src/research-tape.mjs && node --check src/capture-layout.mjs && node --check src/tape-audit.mjs && node --check bin/capture-open-sports.mjs && node --check bin/capture-market.mjs && node --check bin/capture-milestone.mjs && node --check bin/capture-tape.mjs && node --check bin/capture-poll.mjs && node --check bin/capture-active-sports.mjs && node --check bin/capture-active-sports-cycle.mjs && node --check bin/audit-tape.mjs && node --check bin/refresh-active-sports-watchset.mjs && node --check bin/capture-watchset-sample.mjs && node --check bin/capture-watchset-event-sentry.mjs && node --check bin/capture-watchset-markets.mjs && node --test test/*.test.mjs",
+    "check": "node --check src/public-market-data.mjs && node --check src/research-tape.mjs && node --check src/capture-layout.mjs && node --check src/tape-audit.mjs && node --check bin/capture-open-sports.mjs && node --check bin/capture-market.mjs && node --check bin/capture-milestone.mjs && node --check bin/capture-tape.mjs && node --check bin/capture-poll.mjs && node --check bin/capture-active-sports.mjs && node --check bin/capture-active-sports-cycle.mjs && node --check bin/audit-tape.mjs && node --check bin/refresh-active-sports-watchset.mjs && node --check bin/capture-watchset-sample.mjs && node --check bin/capture-watchset-event-sentry.mjs && node --check bin/capture-watchset-markets.mjs && node --test test/*.test.mjs && node --check src/watchset-sample-phases.mjs && node --check test/watchset-sample-phases.test.mjs && node --check bin/capture-watchset-milestones.mjs && node --check bin/capture-watchset-orderbook-sentry.mjs",
     "capture:sports": "node bin/capture-open-sports.mjs"
   },
   "bin": {
@@ -26,6 +27,8 @@
     "kalshi-refresh-active-sports-watchset": "./bin/refresh-active-sports-watchset.mjs",
     "kalshi-capture-watchset-sample": "./bin/capture-watchset-sample.mjs",
     "kalshi-capture-watchset-event-sentry": "./bin/capture-watchset-event-sentry.mjs",
-    "kalshi-capture-watchset-markets": "./bin/capture-watchset-markets.mjs"
+    "kalshi-capture-watchset-markets": "./bin/capture-watchset-markets.mjs",
+    "kalshi-capture-watchset-orderbook-sentry": "./bin/capture-watchset-orderbook-sentry.mjs",
+    "kalshi-capture-watchset-milestones": "./bin/capture-watchset-milestones.mjs"
   }
 }

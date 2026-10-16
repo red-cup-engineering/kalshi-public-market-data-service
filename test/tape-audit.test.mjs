@@ -39,3 +39,33 @@ test("single-sample streams do not fabricate cadence statistics", () => {
   assert.equal(audit.streams[0].medianIntervalMs, null);
   assert.equal(audit.streams[0].maxIntervalMs, null);
 });
+
+
+test("orderbook sentry streams receive independent cadence audits", () => {
+  const audit = auditResearchTape([
+    record("market-orderbook-sentry", "2026-10-03T20:00:00.000Z", {
+      ticker: "KX-A",
+    }),
+    record("market-orderbook-sentry", "2026-10-03T20:00:01.000Z", {
+      ticker: "KX-A",
+    }),
+    record("market-orderbook-sentry", "2026-10-03T20:00:02.000Z", {
+      ticker: "KX-A",
+    }),
+    record("market", "2026-10-03T20:00:00.000Z", {
+      ticker: "KX-A",
+    }),
+  ], {
+    expectedIntervalMs: 1_000,
+    gapFactor: 2.5,
+  });
+
+  const sentry = audit.streams.find((item) =>
+    item.stream === "orderbook-sentry:KX-A");
+  const full = audit.streams.find((item) => item.stream === "market:KX-A");
+  assert.equal(sentry.samples, 3);
+  assert.equal(sentry.medianIntervalMs, 1_000);
+  assert.equal(sentry.longGapCount, 0);
+  assert.equal(full.samples, 1);
+  assert.equal(full.medianIntervalMs, null);
+});

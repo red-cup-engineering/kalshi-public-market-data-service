@@ -1,10 +1,7 @@
 #!/usr/bin/env node
 import { mkdir, readFile } from "node:fs/promises";
 import { captureMarketSnapshot } from "../src/public-market-data.mjs";
-import {
-  dailySportsTapePath,
-  resolveSportsCaptureConfig,
-} from "../src/capture-layout.mjs";
+import { dailySportsTapePath, resolveSportsCaptureConfig } from "../src/capture-layout.mjs";
 import { appendTapeRecord, formTapeRecord } from "../src/research-tape.mjs";
 
 const args = process.argv.slice(2);
@@ -15,14 +12,15 @@ const get = (name, fallback = null) => {
 
 const configured = resolveSportsCaptureConfig();
 const root = get("root", configured.root);
-const watchsetFile = get("watchset", process.env.KALSHI_SPORTS_WATCHSET_PATH);
-if (!watchsetFile) throw new TypeError("kalshi-watchset-path-required");
-const maxAgeMs = Number(get("max-age-ms", "360000"));
+const watchsetFile = get("watchset");
+const maxAgeMs = Number(get("max-age-ms", "300000"));
 const concurrency = Number(get("concurrency", "2"));
+const sampledAt = new Date().toISOString();
 
-if (!Number.isInteger(maxAgeMs) || maxAgeMs < 1000 ||
+if (!watchsetFile ||
+    !Number.isInteger(maxAgeMs) || maxAgeMs < 1000 ||
     !Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) {
-  process.stderr.write("invalid max age or concurrency\n");
+  process.stderr.write("usage: capture-watchset-markets --watchset=FILE [--root=DIR] [--max-age-ms=N] [--concurrency=N]\n");
   process.exit(2);
 }
 
@@ -61,8 +59,7 @@ let cursor = 0;
 
 async function worker() {
   while (true) {
-    const index = cursor;
-    cursor += 1;
+    const index = cursor++;
     if (index >= tasks.length) return;
     const task = tasks[index];
     try {
@@ -85,7 +82,6 @@ await Promise.all(
   Array.from({ length: Math.min(concurrency, Math.max(1, tasks.length)) }, () => worker()),
 );
 
-const sampledAt = new Date().toISOString();
 await mkdir(root, { recursive: true });
 const tapePath = dailySportsTapePath(root, sampledAt);
 let accepted = 0;
@@ -94,21 +90,22 @@ let failures = 0;
 for (const item of results) {
   if (!item) continue;
   if (item.result.type !== "Accept") {
-    failures += 1;
+    failures++;
     process.stderr.write(JSON.stringify({
-      type: "MarketBaselineReject",
+      type: "MarketCaptureReject",
       ticker: item.task.ticker,
       result: item.result,
     }) + "\n");
     continue;
   }
   const payload = item.result.object;
+  const capturedAt = payload?.observedAt ?? payload?.retrievedAt ?? new Date().toISOString();
   await appendTapeRecord(tapePath, formTapeRecord({
     recordType: "market",
     payload,
-    capturedAt: payload?.observedAt ?? payload?.retrievedAt ?? sampledAt,
+    capturedAt,
   }));
-  accepted += 1;
+  accepted++;
 }
 
 process.stdout.write(JSON.stringify({
@@ -116,11 +113,10 @@ process.stdout.write(JSON.stringify({
   sampledAt,
   tape: tapePath,
   watchsetId: watchset.id ?? null,
-  requestedMarkets: watchset.marketTickers.length,
-  acceptedMarkets: accepted,
+  requested: tasks.length,
+  accepted,
   failures,
   concurrency,
-  estimatedRestReads: watchset.marketTickers.length * 3,
 }) + "\n");
 
-if (watchset.marketTickers.length > 0 && accepted === 0 && failures > 0) process.exitCode = 1;
+if (tasks.length > 0 && accepted === 0 && failures > 0) process.exitCode = 1;

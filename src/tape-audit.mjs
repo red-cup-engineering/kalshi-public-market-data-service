@@ -41,6 +41,8 @@ export function auditResearchTape(records, {
     let streamKey = null;
     if (record.recordType === "market" && record.payload?.ticker) {
       streamKey = "market:" + record.payload.ticker;
+    } else if (record.recordType === "market-orderbook-sentry" && record.payload?.ticker) {
+      streamKey = "orderbook-sentry:" + record.payload.ticker;
     } else if (record.recordType === "milestone-attention" && record.payload?.milestoneId) {
       streamKey = "milestone:" + record.payload.milestoneId;
     }

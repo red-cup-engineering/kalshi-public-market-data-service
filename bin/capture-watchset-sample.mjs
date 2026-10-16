@@ -6,6 +6,7 @@ import {
 } from "../src/public-market-data.mjs";
 import { dailySportsTapePath, resolveSportsCaptureConfig } from "../src/capture-layout.mjs";
 import { appendTapeRecord, formTapeRecord } from "../src/research-tape.mjs";
+import { captureWatchsetMilestoneFirst } from "../src/watchset-sample-phases.mjs";
 
 const args = process.argv.slice(2);
 const get = (name, fallback = null) => {
@@ -54,47 +55,33 @@ if (!Number.isFinite(generatedMs) || Date.now() - generatedMs > maxAgeMs) {
   process.exit(0);
 }
 
-const tasks = [
-  ...watchset.marketTickers.map((ticker) => ({
-    recordType: "market",
-    id: ticker,
-    run: () => captureMarketSnapshot(ticker),
+const phased = await captureWatchsetMilestoneFirst({
+  milestoneIds: watchset.milestoneIds,
+  marketTickers: watchset.marketTickers,
+  concurrency,
+  captureMilestone: (milestoneId) => captureMilestoneAttentionSnapshot(milestoneId, {
+    includePlayerStats: true,
+    includeGameStats: true,
+  }),
+  captureMarket: (ticker) => captureMarketSnapshot(ticker),
+});
+
+const results = [
+  ...phased.milestoneResults.map(({ item, result }) => ({
+    task: {
+      recordType: "milestone-attention",
+      id: item,
+    },
+    result,
   })),
-  ...watchset.milestoneIds.map((milestoneId) => ({
-    recordType: "milestone-attention",
-    id: milestoneId,
-    run: () => captureMilestoneAttentionSnapshot(milestoneId, {
-      includePlayerStats: true,
-      includeGameStats: true,
-    }),
+  ...phased.marketResults.map(({ item, result }) => ({
+    task: {
+      recordType: "market",
+      id: item,
+    },
+    result,
   })),
 ];
-
-const results = new Array(tasks.length);
-let cursor = 0;
-async function worker() {
-  while (true) {
-    const index = cursor;
-    cursor += 1;
-    if (index >= tasks.length) return;
-    const task = tasks[index];
-    try {
-      results[index] = { task, result: await task.run() };
-    } catch (error) {
-      results[index] = {
-        task,
-        result: {
-          type: "Reject",
-          code: "capture-exception",
-          detail: error instanceof Error ? error.message : String(error),
-          venueWrite: false,
-        },
-      };
-    }
-  }
-}
-await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(1, tasks.length)) }, () => worker()));
-
 await mkdir(root, { recursive: true });
 const tapePath = dailySportsTapePath(root, sampledAt);
 let accepted = 0;
@@ -127,10 +114,21 @@ process.stdout.write(JSON.stringify({
   sampledAt,
   tape: tapePath,
   watchsetId: watchset.id ?? null,
-  requested: tasks.length,
+  requested: watchset.milestoneIds.length + watchset.marketTickers.length,
+  requestedMilestones: watchset.milestoneIds.length,
+  requestedMarkets: watchset.marketTickers.length,
   accepted,
   failures,
   concurrency,
+  phaseOrder: ["milestone-attention", "market"],
+  startedAt: phased.startedAt,
+  milestonePhaseCompletedAt: phased.milestonePhaseCompletedAt,
+  marketPhaseStartedAt: phased.marketPhaseStartedAt,
+  completedAt: phased.completedAt,
 }) + "\n");
 
-if (tasks.length > 0 && accepted === 0 && failures > 0) process.exitCode = 1;
+if (watchset.milestoneIds.length + watchset.marketTickers.length > 0 &&
+    accepted === 0 &&
+    failures > 0) {
+  process.exitCode = 1;
+}
