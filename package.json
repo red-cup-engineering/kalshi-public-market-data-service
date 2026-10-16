@@ -9,10 +9,11 @@
     "./research-tape": "./src/research-tape.mjs",
     "./capture-layout": "./src/capture-layout.mjs",
     "./tape-audit": "./src/tape-audit.mjs",
-    "./watchset-sample-phases": "./src/watchset-sample-phases.mjs"
+    "./watchset-sample-phases": "./src/watchset-sample-phases.mjs",
+    "./adaptive-attention-policy": "./src/adaptive-attention-policy.mjs"
   },
   "scripts": {
-    "check": "node --check src/public-market-data.mjs && node --check src/research-tape.mjs && node --check src/capture-layout.mjs && node --check src/tape-audit.mjs && node --check bin/capture-open-sports.mjs && node --check bin/capture-market.mjs && node --check bin/capture-milestone.mjs && node --check bin/capture-tape.mjs && node --check bin/capture-poll.mjs && node --check bin/capture-active-sports.mjs && node --check bin/capture-active-sports-cycle.mjs && node --check bin/audit-tape.mjs && node --check bin/refresh-active-sports-watchset.mjs && node --check bin/capture-watchset-sample.mjs && node --check bin/capture-watchset-event-sentry.mjs && node --check bin/capture-watchset-markets.mjs && node --test test/*.test.mjs && node --check src/watchset-sample-phases.mjs && node --check test/watchset-sample-phases.test.mjs && node --check bin/capture-watchset-milestones.mjs && node --check bin/capture-watchset-orderbook-sentry.mjs",
+    "check": "node --check src/public-market-data.mjs && node --check src/research-tape.mjs && node --check src/capture-layout.mjs && node --check src/tape-audit.mjs && node --check bin/capture-open-sports.mjs && node --check bin/capture-market.mjs && node --check bin/capture-milestone.mjs && node --check bin/capture-tape.mjs && node --check bin/capture-poll.mjs && node --check bin/capture-active-sports.mjs && node --check bin/capture-active-sports-cycle.mjs && node --check bin/audit-tape.mjs && node --check bin/refresh-active-sports-watchset.mjs && node --check bin/capture-watchset-sample.mjs && node --check bin/capture-watchset-event-sentry.mjs && node --check bin/capture-watchset-markets.mjs && node --test test/*.test.mjs && node --check src/watchset-sample-phases.mjs && node --check test/watchset-sample-phases.test.mjs && node --check bin/capture-watchset-milestones.mjs && node --check bin/capture-watchset-orderbook-sentry.mjs && node --check src/adaptive-attention-policy.mjs",
     "capture:sports": "node bin/capture-open-sports.mjs"
   },
   "bin": {
