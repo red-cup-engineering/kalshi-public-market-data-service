@@ -37,6 +37,14 @@ function semanticId(value) {
   return `ni:///sha-256;${createHash("sha256").update(canonical(value)).digest("base64url")}`;
 }
 
+function latestRetrievedAt(results) {
+  const times = results
+    .map((result) => result?.retrievedAt)
+    .filter((value) => Number.isFinite(Date.parse(value)));
+  if (times.length === 0) throw new TypeError("accepted-component-retrieval-time-required");
+  return new Date(Math.max(...times.map((value) => Date.parse(value)))).toISOString();
+}
+
 async function publicGet(path, params = new URLSearchParams(), {
   fetchImpl = globalThis.fetch,
   timeoutMs = 20_000,
@@ -160,6 +168,36 @@ export const getMarket = (marketTicker, { fetchImpl, clock } = {}) =>
 
 export const getOrderbook = (marketTicker, { fetchImpl, clock } = {}) =>
   publicGet(`/markets/${encodeURIComponent(ticker(marketTicker))}/orderbook`, new URLSearchParams(), { fetchImpl, clock });
+
+
+export async function captureMarketOrderbookSentrySnapshot(marketTicker, {
+  fetchImpl,
+  clock = () => new Date(),
+} = {}) {
+  const t = ticker(marketTicker);
+  const result = await getOrderbook(t, { fetchImpl, clock });
+  if (result.type !== "Accept") return result;
+
+  const observedAt = clock().toISOString();
+  const body = Object.freeze({
+    provider: "Kalshi",
+    kind: "MarketOrderbookSentrySnapshot",
+    attentionMode: "orderbook-sentry",
+    transport: "rest-poll",
+    ticker: t,
+    observedAt,
+    orderbook: result.object?.orderbook_fp ?? null,
+    provenance: Object.freeze({
+      orderbook: result.source,
+    }),
+  });
+
+  return Object.freeze({
+    type: "Accept",
+    id: semanticId(body),
+    object: body,
+  });
+}
 
 export async function getTrades({
   marketTicker = null,
@@ -346,17 +384,23 @@ export async function captureMarketSnapshot(marketTicker, {
     });
   }
 
-  const retrievedAt = (clock ?? (() => new Date()))().toISOString();
+  const observedAt = latestRetrievedAt([market, orderbook, trades]);
   const body = Object.freeze({
     provider: "Kalshi",
     kind: "PublicMarketSnapshot",
     transport: "rest-poll",
     ticker: t,
-    retrievedAt,
-    observedAt: retrievedAt,
+    retrievedAt: observedAt,
+    observedAt,
     market: market.object?.market ?? null,
     orderbook: orderbook.object?.orderbook_fp ?? null,
     trades: Object.freeze(Array.isArray(trades.object?.trades) ? trades.object.trades : []),
+    availability: Object.freeze({
+      marketRetrievedAt: market.retrievedAt,
+      orderbookRetrievedAt: orderbook.retrievedAt,
+      tradesRetrievedAt: trades.retrievedAt,
+      allAvailableAt: observedAt,
+    }),
     provenance: Object.freeze({
       market: market.source,
       orderbook: orderbook.source,
@@ -445,7 +489,11 @@ export async function captureMilestoneAttentionSnapshot(id, {
     ? await getGameStats(mid, { fetchImpl, clock })
     : null;
 
-  const observedAt = (clock ?? (() => new Date()))().toISOString();
+  const acceptedComponents = [
+    live,
+    ...(gameStats?.type === "Accept" ? [gameStats] : []),
+  ];
+  const observedAt = latestRetrievedAt(acceptedComponents);
   const body = Object.freeze({
     provider: "Kalshi",
     kind: "MilestoneAttentionSnapshot",
@@ -459,6 +507,11 @@ export async function captureMilestoneAttentionSnapshot(id, {
       : gameStats.type === "Accept"
         ? "available"
         : "unavailable",
+    availability: Object.freeze({
+      liveDataRetrievedAt: live.retrievedAt,
+      gameStatsRetrievedAt: gameStats?.type === "Accept" ? gameStats.retrievedAt : null,
+      allAvailableAt: observedAt,
+    }),
     provenance: Object.freeze({
       liveData: live.source,
       gameStats: gameStats?.type === "Accept" ? gameStats.source : null,
@@ -1034,7 +1087,7 @@ export async function captureEventFeeContext(event, {
     });
   }
 
-  const observedAt = (clock ?? (() => new Date()))().toISOString();
+  const observedAt = latestRetrievedAt([series, seriesChanges, eventChanges]);
   const seriesObject = series.object?.series ?? null;
 
   const body = Object.freeze({
@@ -1061,6 +1114,12 @@ export async function captureEventFeeContext(event, {
           ? eventChanges.object.fee_changes
           : [],
       ),
+    }),
+    availability: Object.freeze({
+      seriesRetrievedAt: series.retrievedAt,
+      seriesFeeChangesRetrievedAt: seriesChanges.retrievedAt,
+      eventFeeChangesRetrievedAt: eventChanges.retrievedAt,
+      allAvailableAt: observedAt,
     }),
     provenance: Object.freeze({
       series: series.source,
@@ -1105,5 +1164,362 @@ export async function captureEventFeeContextByTicker(eventTicker, {
     fetchImpl,
     clock,
     eventSource: eventResult.source,
+  });
+}
+
+
+const CANDLESTICK_PERIODS = new Set([1, 60, 1440]);
+
+function unixSeconds(value, name) {
+  if (!Number.isInteger(value) || value < 0 || value > Number.MAX_SAFE_INTEGER) {
+    throw new TypeError(`valid-${name}-required`);
+  }
+  return value;
+}
+
+function candlestickQuery({
+  startTs,
+  endTs,
+  periodInterval = 1,
+  includeLatestBeforeStart = false,
+} = {}) {
+  const start = unixSeconds(startTs, "candlestick-start-ts");
+  const end = unixSeconds(endTs, "candlestick-end-ts");
+  if (end < start) throw new TypeError("candlestick-end-before-start");
+  if (!CANDLESTICK_PERIODS.has(periodInterval)) {
+    throw new TypeError("valid-candlestick-period-required");
+  }
+
+  const params = new URLSearchParams();
+  params.set("start_ts", String(start));
+  params.set("end_ts", String(end));
+  params.set("period_interval", String(periodInterval));
+  if (includeLatestBeforeStart) params.set("include_latest_before_start", "true");
+  return params;
+}
+
+export function getHistoricalCutoff({ fetchImpl, clock } = {}) {
+  return publicGet("/historical/cutoff", new URLSearchParams(), { fetchImpl, clock });
+}
+
+export function getMarketCandlesticks({
+  seriesTicker,
+  marketTicker,
+  startTs,
+  endTs,
+  periodInterval = 1,
+  includeLatestBeforeStart = false,
+  fetchImpl,
+  clock,
+} = {}) {
+  const series = ticker(seriesTicker, "series-ticker");
+  const market = ticker(marketTicker, "market-ticker");
+  const params = candlestickQuery({
+    startTs,
+    endTs,
+    periodInterval,
+    includeLatestBeforeStart,
+  });
+  return publicGet(
+    `/series/${encodeURIComponent(series)}/markets/${encodeURIComponent(market)}/candlesticks`,
+    params,
+    { fetchImpl, clock },
+  );
+}
+
+export function getHistoricalMarketCandlesticks({
+  marketTicker,
+  startTs,
+  endTs,
+  periodInterval = 1,
+  fetchImpl,
+  clock,
+} = {}) {
+  const market = ticker(marketTicker, "market-ticker");
+  const params = candlestickQuery({
+    startTs,
+    endTs,
+    periodInterval,
+    includeLatestBeforeStart: false,
+  });
+  return publicGet(
+    `/historical/markets/${encodeURIComponent(market)}/candlesticks`,
+    params,
+    { fetchImpl, clock },
+  );
+}
+
+export async function getMarketCandlesticksRouted({
+  seriesTicker = null,
+  marketTicker,
+  marketSettledAt = null,
+  cutoff = null,
+  startTs,
+  endTs,
+  periodInterval = 1,
+  includeLatestBeforeStart = false,
+  fetchImpl,
+  clock,
+} = {}) {
+  const market = ticker(marketTicker, "market-ticker");
+
+  let cutoffObject = cutoff;
+  if (cutoffObject === null && marketSettledAt !== null) {
+    const result = await getHistoricalCutoff({ fetchImpl, clock });
+    if (result.type !== "Accept") return result;
+    cutoffObject = result.object;
+  }
+
+  const settledMs = marketSettledAt === null ? NaN : Date.parse(marketSettledAt);
+  const cutoffMs = Date.parse(cutoffObject?.market_settled_ts ?? "");
+  const useHistorical =
+    Number.isFinite(settledMs) &&
+    Number.isFinite(cutoffMs) &&
+    settledMs < cutoffMs;
+
+  if (useHistorical) {
+    const result = await getHistoricalMarketCandlesticks({
+      marketTicker: market,
+      startTs,
+      endTs,
+      periodInterval,
+      fetchImpl,
+      clock,
+    });
+    if (result.type !== "Accept") return result;
+    return Object.freeze({
+      ...result,
+      tier: "historical",
+      cutoff: cutoffObject,
+    });
+  }
+
+  if (!nonEmpty(seriesTicker)) {
+    throw new TypeError("series-ticker-required-for-live-candlesticks");
+  }
+  const result = await getMarketCandlesticks({
+    seriesTicker,
+    marketTicker: market,
+    startTs,
+    endTs,
+    periodInterval,
+    includeLatestBeforeStart,
+    fetchImpl,
+    clock,
+  });
+  if (result.type !== "Accept") return result;
+  return Object.freeze({
+    ...result,
+    tier: "live",
+    cutoff: cutoffObject,
+  });
+}
+
+function candleDollar(section, field) {
+  if (!section || typeof section !== "object") return null;
+  for (const key of [`${field}_dollars`, field]) {
+    const value = section[key];
+    if (value === null || value === undefined || value === "") continue;
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 1) return parsed;
+  }
+  return null;
+}
+
+export function describeCandlestickProbability(candlestick) {
+  if (!candlestick || typeof candlestick !== "object" ||
+      !Number.isInteger(candlestick.end_period_ts)) {
+    throw new TypeError("valid-candlestick-required");
+  }
+
+  const yesBid = candleDollar(candlestick.yes_bid, "close");
+  const yesAsk = candleDollar(candlestick.yes_ask, "close");
+  if (yesBid !== null && yesAsk !== null && yesAsk >= yesBid) {
+    return Object.freeze({
+      endPeriodTs: candlestick.end_period_ts,
+      probabilityYes: (yesBid + yesAsk) / 2,
+      basis: "bid-ask-midpoint",
+      yesBid,
+      yesAsk,
+    });
+  }
+
+  const priceClose = candleDollar(candlestick.price, "close");
+  if (priceClose !== null) {
+    return Object.freeze({
+      endPeriodTs: candlestick.end_period_ts,
+      probabilityYes: priceClose,
+      basis: "trade-price-close",
+      yesBid,
+      yesAsk,
+    });
+  }
+
+  const previous = candleDollar(candlestick.price, "previous");
+  if (previous !== null) {
+    return Object.freeze({
+      endPeriodTs: candlestick.end_period_ts,
+      probabilityYes: previous,
+      basis: "previous-trade-price",
+      yesBid,
+      yesAsk,
+    });
+  }
+
+  return Object.freeze({
+    endPeriodTs: candlestick.end_period_ts,
+    probabilityYes: null,
+    basis: "unavailable",
+    yesBid,
+    yesAsk,
+  });
+}
+
+export function selectCandlestickProbabilityAtOrBefore(payload, asOfTs) {
+  const cutoff = unixSeconds(asOfTs, "candlestick-as-of-ts");
+  const candles = Array.isArray(payload?.candlesticks) ? payload.candlesticks : [];
+  let best = null;
+
+  for (const candle of candles) {
+    if (!candle || !Number.isInteger(candle.end_period_ts) ||
+        candle.end_period_ts > cutoff) continue;
+    if (!best || candle.end_period_ts > best.end_period_ts) best = candle;
+  }
+
+  return best ? describeCandlestickProbability(best) : null;
+}
+
+export function formThreeWayMarketPrior({
+  home,
+  draw,
+  away,
+  asOfTs,
+} = {}) {
+  const selected = {
+    home: selectCandlestickProbabilityAtOrBefore(home, asOfTs),
+    draw: selectCandlestickProbabilityAtOrBefore(draw, asOfTs),
+    away: selectCandlestickProbabilityAtOrBefore(away, asOfTs),
+  };
+
+  for (const outcome of ["home", "draw", "away"]) {
+    if (!selected[outcome] || !Number.isFinite(selected[outcome].probabilityYes)) {
+      throw new TypeError(`three-way-${outcome}-probability-unavailable`);
+    }
+  }
+
+  const raw = {
+    home: selected.home.probabilityYes,
+    draw: selected.draw.probabilityYes,
+    away: selected.away.probabilityYes,
+  };
+  const total = raw.home + raw.draw + raw.away;
+  if (!(total > 0)) throw new TypeError("positive-three-way-probability-mass-required");
+
+  return Object.freeze({
+    type: "ThreeWayMarketPrior",
+    asOfTs: unixSeconds(asOfTs, "three-way-prior-as-of-ts"),
+    raw: Object.freeze(raw),
+    normalized: Object.freeze({
+      home: raw.home / total,
+      draw: raw.draw / total,
+      away: raw.away / total,
+    }),
+    overround: total - 1,
+    observations: Object.freeze(selected),
+  });
+}
+
+
+export async function captureThreeWayMarketPrior({
+  home,
+  draw,
+  away,
+  asOfTs,
+  lookbackSeconds = 21_600,
+  periodInterval = 1,
+  fetchImpl,
+  clock,
+} = {}) {
+  const cutoff = unixSeconds(asOfTs, "three-way-capture-as-of-ts");
+  if (!Number.isInteger(lookbackSeconds) || lookbackSeconds < 60 || lookbackSeconds > 604_800) {
+    throw new TypeError("valid-three-way-lookback-required");
+  }
+
+  const descriptors = { home, draw, away };
+  for (const outcome of ["home", "draw", "away"]) {
+    const descriptor = descriptors[outcome];
+    if (!descriptor || !nonEmpty(descriptor.marketTicker)) {
+      throw new TypeError(`three-way-${outcome}-market-required`);
+    }
+  }
+
+  const startTs = Math.max(0, cutoff - lookbackSeconds);
+  const entries = await Promise.all(
+    ["home", "draw", "away"].map(async (outcome) => {
+      const descriptor = descriptors[outcome];
+      const result = await getMarketCandlesticksRouted({
+        seriesTicker: descriptor.seriesTicker ?? null,
+        marketTicker: descriptor.marketTicker,
+        marketSettledAt: descriptor.marketSettledAt ?? null,
+        cutoff: descriptor.cutoff ?? null,
+        startTs,
+        endTs: cutoff,
+        periodInterval,
+        includeLatestBeforeStart: true,
+        fetchImpl,
+        clock,
+      });
+      return [outcome, descriptor, result];
+    }),
+  );
+
+  const failures = entries.filter(([, , result]) => result.type !== "Accept");
+  if (failures.length > 0) {
+    return Object.freeze({
+      type: "Reject",
+      code: "incomplete-three-way-candlestick-prior",
+      failures: Object.freeze(failures.map(([outcome, descriptor, result]) => Object.freeze({
+        outcome,
+        marketTicker: descriptor.marketTicker,
+        result,
+      }))),
+      venueWrite: false,
+    });
+  }
+
+  const payloads = Object.fromEntries(
+    entries.map(([outcome, , result]) => [outcome, result.object]),
+  );
+  const prior = formThreeWayMarketPrior({
+    home: payloads.home,
+    draw: payloads.draw,
+    away: payloads.away,
+    asOfTs: cutoff,
+  });
+  const observedAt = (clock ?? (() => new Date()))().toISOString();
+
+  const body = Object.freeze({
+    provider: "Kalshi",
+    kind: "ThreeWayMarketPriorSnapshot",
+    observedAt,
+    asOfTs: cutoff,
+    lookbackSeconds,
+    periodInterval,
+    markets: Object.freeze(Object.fromEntries(
+      entries.map(([outcome, descriptor, result]) => [outcome, Object.freeze({
+        marketTicker: descriptor.marketTicker,
+        seriesTicker: descriptor.seriesTicker ?? null,
+        marketSettledAt: descriptor.marketSettledAt ?? null,
+        tier: result.tier,
+        source: result.source,
+      })]),
+    )),
+    prior,
+  });
+
+  return Object.freeze({
+    type: "Accept",
+    id: semanticId(body),
+    object: body,
   });
 }

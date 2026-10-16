@@ -1,27 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  KALSHI_PUBLIC_BASE,
-  captureEventFeeContext,
-  captureEventFeeContextByTicker,
-  captureMarketSnapshot,
-  captureMilestoneEventSentrySnapshot,
-  getEvent,
-  getMarkets,
-  getOrderbook,
-  getGameStats,
-  getMilestoneLiveData,
-  getMilestones,
-  getSportsFilters,
-  listOpenSportsEvents,
-  listSportsMilestones,
-  deriveActiveSportsWatchset,
-  describeMarketObservability,
-  describeOrderbookObservability,
-  resolveActiveSportsWatchset,
-} from "../src/public-market-data.mjs";
-
+import { KALSHI_PUBLIC_BASE, captureEventFeeContext, captureEventFeeContextByTicker, captureMarketSnapshot, captureMilestoneEventSentrySnapshot, captureThreeWayMarketPrior, getEvent, getMarkets, getOrderbook, getGameStats, getMilestoneLiveData, getMilestones, getSportsFilters, listOpenSportsEvents, listSportsMilestones, deriveActiveSportsWatchset, describeCandlestickProbability, describeMarketObservability, describeOrderbookObservability, formThreeWayMarketPrior, getHistoricalCutoff, getHistoricalMarketCandlesticks, getMarketCandlesticks, getMarketCandlesticksRouted, resolveActiveSportsWatchset, captureMilestoneAttentionSnapshot, captureMarketOrderbookSentrySnapshot } from "../src/public-market-data.mjs";
 const fixedClock = () => new Date("2026-10-03T19:50:00.000Z");
 
 function response(payload, status = 200) {
@@ -458,6 +438,106 @@ test("milestone-first watchset refuses to call a stale unknown-duration game act
 });
 
 
+test("composite market snapshot exposes component retrieval times and uses the latest as observedAt", async () => {
+  const times = [
+    "2026-10-03T20:00:00.100Z",
+    "2026-10-03T20:00:00.200Z",
+    "2026-10-03T20:00:00.300Z",
+  ];
+  let clockIndex = 0;
+  const clock = () => new Date(times[Math.min(clockIndex++, times.length - 1)]);
+
+  const result = await captureMarketSnapshot("KXTEST-YES", {
+    clock,
+    fetchImpl: async (url) => {
+      const pathname = new URL(url).pathname;
+      if (pathname.endsWith("/orderbook")) {
+        return response({ orderbook_fp: { yes_dollars: [["0.60", "10"]], no_dollars: [["0.39", "11"]] } });
+      }
+      if (pathname.endsWith("/markets/trades")) {
+        return response({ trades: [], cursor: "" });
+      }
+      if (pathname.endsWith("/markets/KXTEST-YES")) {
+        return response({ market: { ticker: "KXTEST-YES" } });
+      }
+      return response({}, 404);
+    },
+  });
+
+  const componentTimes = [
+    result.object.availability.marketRetrievedAt,
+    result.object.availability.orderbookRetrievedAt,
+    result.object.availability.tradesRetrievedAt,
+  ];
+  assert.equal(new Set(componentTimes).size, 3);
+  assert.equal(
+    result.object.observedAt,
+    new Date(Math.max(...componentTimes.map((value) => Date.parse(value)))).toISOString(),
+  );
+  assert.equal(result.object.availability.allAvailableAt, result.object.observedAt);
+});
+
+test("milestone snapshot distinguishes live-data availability from later play-by-play availability", async () => {
+  const times = [
+    "2026-10-03T20:00:00.100Z",
+    "2026-10-03T20:00:00.450Z",
+  ];
+  let clockIndex = 0;
+  const clock = () => new Date(times[Math.min(clockIndex++, times.length - 1)]);
+
+  const result = await captureMilestoneAttentionSnapshot("milestone-123", {
+    clock,
+    fetchImpl: async (url) => {
+      const pathname = new URL(url).pathname;
+      if (pathname.endsWith("/game_stats")) {
+        return response({ pbp: { periods: [] } });
+      }
+      return response({ live_data: { milestone_id: "milestone-123", type: "sports" } });
+    },
+  });
+
+  assert.equal(result.object.availability.liveDataRetrievedAt, times[0]);
+  assert.equal(result.object.availability.gameStatsRetrievedAt, times[1]);
+  assert.equal(result.object.observedAt, times[1]);
+  assert.equal(result.object.availability.allAvailableAt, times[1]);
+});
+
+test("fee context observedAt is the conservative latest component availability time", async () => {
+  const times = [
+    "2026-10-03T20:00:00.100Z",
+    "2026-10-03T20:00:00.200Z",
+    "2026-10-03T20:00:00.500Z",
+  ];
+  let clockIndex = 0;
+  const clock = () => new Date(times[Math.min(clockIndex++, times.length - 1)]);
+
+  const result = await captureEventFeeContext({
+    event_ticker: "SPORT-1",
+    series_ticker: "KXSPORT",
+  }, {
+    clock,
+    fetchImpl: async (url) => {
+      const pathname = new URL(url).pathname;
+      if (pathname.endsWith("/series/KXSPORT")) {
+        return response({ series: { ticker: "KXSPORT", fee_type: "quadratic", fee_multiplier: 1 } });
+      }
+      if (pathname.endsWith("/series/fee_changes")) return response({ fee_changes: [] });
+      if (pathname.endsWith("/events/fee_changes")) return response({ fee_changes: [], cursor: "" });
+      return response({}, 404);
+    },
+  });
+
+  const componentTimes = [
+    result.object.availability.seriesRetrievedAt,
+    result.object.availability.seriesFeeChangesRetrievedAt,
+    result.object.availability.eventFeeChangesRetrievedAt,
+  ];
+  assert.equal(new Set(componentTimes).size, 3);
+  assert.equal(
+    result.object.observedAt,
+    new Date(Math.max(...componentTimes.map((value) => Date.parse(value)))).toISOString(),
+  );
+});
 test("single event lookup is public and preserves series metadata needed for fees", async () => {
   let seen;
   const result = await getEvent("SPORT-LATE", {
@@ -1125,4 +1205,288 @@ test("event-sentry capture uses only the milestone game-stats endpoint and remai
   assert.equal(result.object.gameStatsStatus, "available");
   assert.equal(result.object.gameStats.periods[0].events[0].event_type, "shot_off_target");
   assert.match(result.object.provenance.gameStats, /game_stats$/);
+});
+
+
+test("orderbook sentry uses one public orderbook read and preserves only latency-race evidence", async () => {
+  const seen = [];
+  const result = await captureMarketOrderbookSentrySnapshot("KXTEST-YES", {
+    clock: fixedClock,
+    fetchImpl: async (url, options) => {
+      seen.push({ url: new URL(url), options });
+      return response({
+        orderbook_fp: {
+          yes_dollars: [["0.48", "12"]],
+          no_dollars: [["0.50", "11"]],
+        },
+      });
+    },
+  });
+
+  assert.equal(result.type, "Accept");
+  assert.equal(result.object.kind, "MarketOrderbookSentrySnapshot");
+  assert.equal(result.object.attentionMode, "orderbook-sentry");
+  assert.equal(result.object.ticker, "KXTEST-YES");
+  assert.equal(result.object.observedAt, "2026-10-03T19:50:00.000Z");
+  assert.deepEqual(result.object.orderbook.yes_dollars, [["0.48", "12"]]);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].url.pathname, "/trade-api/v2/markets/KXTEST-YES/orderbook");
+  assert.equal(seen[0].options.method, "GET");
+  assert.equal(seen[0].options.headers["KALSHI-ACCESS-KEY"], undefined);
+  assert.equal(result.object.market, undefined);
+  assert.equal(result.object.trades, undefined);
+});
+test("live market candlesticks use the documented series-scoped public endpoint", async () => {
+  let seen;
+  const result = await getMarketCandlesticks({
+    seriesTicker: "KXSOCCER",
+    marketTicker: "KXSOCCER-GAME-HOME",
+    startTs: 1_800_000_000,
+    endTs: 1_800_003_600,
+    periodInterval: 1,
+    includeLatestBeforeStart: true,
+    clock: fixedClock,
+    fetchImpl: async (url, options) => {
+      seen = { url: new URL(url), options };
+      return response({ ticker: "KXSOCCER-GAME-HOME", candlesticks: [] });
+    },
+  });
+
+  assert.equal(result.type, "Accept");
+  assert.equal(
+    seen.url.pathname,
+    "/trade-api/v2/series/KXSOCCER/markets/KXSOCCER-GAME-HOME/candlesticks",
+  );
+  assert.equal(seen.url.searchParams.get("start_ts"), "1800000000");
+  assert.equal(seen.url.searchParams.get("end_ts"), "1800003600");
+  assert.equal(seen.url.searchParams.get("period_interval"), "1");
+  assert.equal(seen.url.searchParams.get("include_latest_before_start"), "true");
+  assert.equal(seen.options.headers["KALSHI-ACCESS-KEY"], undefined);
+});
+
+test("historical candlesticks use the market-only archive endpoint", async () => {
+  let seen;
+  const result = await getHistoricalMarketCandlesticks({
+    marketTicker: "KXOLD-MARKET",
+    startTs: 1_700_000_000,
+    endTs: 1_700_003_600,
+    periodInterval: 60,
+    clock: fixedClock,
+    fetchImpl: async (url, options) => {
+      seen = { url: new URL(url), options };
+      return response({ ticker: "KXOLD-MARKET", candlesticks: [] });
+    },
+  });
+
+  assert.equal(result.type, "Accept");
+  assert.equal(
+    seen.url.pathname,
+    "/trade-api/v2/historical/markets/KXOLD-MARKET/candlesticks",
+  );
+  assert.equal(seen.url.searchParams.get("period_interval"), "60");
+  assert.equal(seen.options.headers["KALSHI-ACCESS-KEY"], undefined);
+});
+
+test("historical cutoff read is public and routing follows market settlement time", async () => {
+  const seen = [];
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    seen.push(parsed.pathname);
+    if (parsed.pathname.endsWith("/historical/cutoff")) {
+      return response({
+        market_settled_ts: "2026-01-01T00:00:00Z",
+        trades_created_ts: "2026-01-01T00:00:00Z",
+        orders_updated_ts: "2026-01-01T00:00:00Z",
+        market_positions_last_updated_ts: "2026-01-01T00:00:00Z",
+      });
+    }
+    if (parsed.pathname.includes("/historical/markets/")) {
+      return response({ ticker: "KXOLD-MARKET", candlesticks: [] });
+    }
+    return response({}, 404);
+  };
+
+  const cutoff = await getHistoricalCutoff({ fetchImpl, clock: fixedClock });
+  assert.equal(cutoff.type, "Accept");
+
+  const routed = await getMarketCandlesticksRouted({
+    marketTicker: "KXOLD-MARKET",
+    marketSettledAt: "2025-12-01T00:00:00Z",
+    startTs: 1_700_000_000,
+    endTs: 1_700_003_600,
+    periodInterval: 1,
+    fetchImpl,
+    clock: fixedClock,
+  });
+
+  assert.equal(routed.type, "Accept");
+  assert.equal(routed.tier, "historical");
+  assert.ok(seen.some((value) => value.endsWith("/historical/cutoff")));
+  assert.ok(seen.some((value) => value.endsWith("/historical/markets/KXOLD-MARKET/candlesticks")));
+});
+
+test("recent or unsettled markets route to live candlesticks and require their series", async () => {
+  const result = await getMarketCandlesticksRouted({
+    seriesTicker: "KXSOCCER",
+    marketTicker: "KXSOCCER-GAME-HOME",
+    marketSettledAt: null,
+    startTs: 1_800_000_000,
+    endTs: 1_800_003_600,
+    periodInterval: 1,
+    fetchImpl: async (url) => {
+      assert.equal(
+        new URL(url).pathname,
+        "/trade-api/v2/series/KXSOCCER/markets/KXSOCCER-GAME-HOME/candlesticks",
+      );
+      return response({ ticker: "KXSOCCER-GAME-HOME", candlesticks: [] });
+    },
+    clock: fixedClock,
+  });
+
+  assert.equal(result.type, "Accept");
+  assert.equal(result.tier, "live");
+
+  await assert.rejects(
+    () => getMarketCandlesticksRouted({
+      marketTicker: "KXSOCCER-GAME-HOME",
+      startTs: 1_800_000_000,
+      endTs: 1_800_003_600,
+      fetchImpl: async () => response({}),
+    }),
+    /series-ticker-required-for-live-candlesticks/,
+  );
+});
+
+test("candlestick probability prefers bid-ask midpoint and tolerates historical field names", () => {
+  const live = describeCandlestickProbability({
+    end_period_ts: 100,
+    yes_bid: { close_dollars: "0.48" },
+    yes_ask: { close_dollars: "0.52" },
+    price: { close_dollars: "0.51" },
+  });
+  assert.equal(live.probabilityYes, 0.5);
+  assert.equal(live.basis, "bid-ask-midpoint");
+
+  const historical = describeCandlestickProbability({
+    end_period_ts: 100,
+    yes_bid: { close: "0.41" },
+    yes_ask: { close: "0.45" },
+    price: { close: "0.44" },
+  });
+  assert.equal(historical.probabilityYes, 0.43);
+  assert.equal(historical.basis, "bid-ask-midpoint");
+});
+
+test("three-way kickoff prior normalizes market midpoints and exposes overround", () => {
+  const payload = (ticker, bid, ask) => ({
+    ticker,
+    candlesticks: [{
+      end_period_ts: 1_800_000_000,
+      yes_bid: { close_dollars: String(bid) },
+      yes_ask: { close_dollars: String(ask) },
+      price: { close_dollars: String((bid + ask) / 2) },
+    }],
+  });
+
+  const prior = formThreeWayMarketPrior({
+    home: payload("HOME", 0.49, 0.51),
+    draw: payload("DRAW", 0.27, 0.29),
+    away: payload("AWAY", 0.23, 0.25),
+    asOfTs: 1_800_000_000,
+  });
+
+  assert.equal(prior.type, "ThreeWayMarketPrior");
+  assert.equal(prior.raw.home, 0.5);
+  assert.equal(prior.raw.draw, 0.28);
+  assert.equal(prior.raw.away, 0.24);
+  assert.equal(prior.overround, 0.020000000000000018);
+  assert.ok(Math.abs(
+    prior.normalized.home + prior.normalized.draw + prior.normalized.away - 1,
+  ) < 1e-12);
+  assert.equal(prior.observations.home.basis, "bid-ask-midpoint");
+});
+
+test("three-way prior uses the last probability observation at or before kickoff", () => {
+  const payload = {
+    ticker: "HOME",
+    candlesticks: [
+      {
+        end_period_ts: 90,
+        yes_bid: { close_dollars: "0.40" },
+        yes_ask: { close_dollars: "0.44" },
+      },
+      {
+        end_period_ts: 100,
+        yes_bid: { close_dollars: "0.50" },
+        yes_ask: { close_dollars: "0.54" },
+      },
+      {
+        end_period_ts: 110,
+        yes_bid: { close_dollars: "0.80" },
+        yes_ask: { close_dollars: "0.84" },
+      },
+    ],
+  };
+
+  const prior = formThreeWayMarketPrior({
+    home: payload,
+    draw: {
+      ticker: "DRAW",
+      candlesticks: [{ end_period_ts: 100, price: { close_dollars: "0.28" } }],
+    },
+    away: {
+      ticker: "AWAY",
+      candlesticks: [{ end_period_ts: 100, price: { previous_dollars: "0.20" } }],
+    },
+    asOfTs: 100,
+  });
+
+  assert.equal(prior.observations.home.endPeriodTs, 100);
+  assert.equal(prior.raw.home, 0.52);
+  assert.equal(prior.observations.draw.basis, "trade-price-close");
+  assert.equal(prior.observations.away.basis, "previous-trade-price");
+});
+
+
+test("three-way market prior capture binds outcome tickers, tiers, source URLs and normalized probabilities", async () => {
+  const seen = [];
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    seen.push(parsed.pathname + parsed.search);
+    const ticker = parsed.pathname.split("/").at(-2);
+    const mid = ticker.endsWith("-HOME") ? 0.50 : ticker.endsWith("-DRAW") ? 0.28 : 0.24;
+    return response({
+      ticker,
+      candlesticks: [{
+        end_period_ts: 1_800_000_000,
+        yes_bid: { close_dollars: String(mid - 0.01) },
+        yes_ask: { close_dollars: String(mid + 0.01) },
+        price: { close_dollars: String(mid) },
+      }],
+    });
+  };
+
+  const result = await captureThreeWayMarketPrior({
+    home: { seriesTicker: "KXSOCCER", marketTicker: "KXSOCCER-HOME" },
+    draw: { seriesTicker: "KXSOCCER", marketTicker: "KXSOCCER-DRAW" },
+    away: { seriesTicker: "KXSOCCER", marketTicker: "KXSOCCER-AWAY" },
+    asOfTs: 1_800_000_000,
+    lookbackSeconds: 3_600,
+    periodInterval: 1,
+    fetchImpl,
+    clock: fixedClock,
+  });
+
+  assert.equal(result.type, "Accept");
+  assert.match(result.id, /^ni:\/\/\/sha-256;/);
+  assert.equal(result.object.kind, "ThreeWayMarketPriorSnapshot");
+  assert.equal(result.object.markets.home.marketTicker, "KXSOCCER-HOME");
+  assert.equal(result.object.markets.home.tier, "live");
+  assert.match(result.object.markets.home.source, /KXSOCCER-HOME\/candlesticks/);
+  assert.ok(Math.abs(
+    result.object.prior.normalized.home +
+    result.object.prior.normalized.draw +
+    result.object.prior.normalized.away - 1,
+  ) < 1e-12);
+  assert.equal(seen.length, 3);
 });
