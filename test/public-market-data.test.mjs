@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { KALSHI_PUBLIC_BASE, captureEventFeeContext, captureEventFeeContextByTicker, captureMarketSnapshot, captureMilestoneEventSentrySnapshot, captureThreeWayMarketPrior, getEvent, getMarkets, getOrderbook, getGameStats, getMilestoneLiveData, getMilestones, getSportsFilters, listOpenSportsEvents, listSportsMilestones, deriveActiveSportsWatchset, describeCandlestickProbability, describeMarketObservability, describeOrderbookObservability, formThreeWayMarketPrior, getHistoricalCutoff, getHistoricalMarketCandlesticks, getMarketCandlesticks, getMarketCandlesticksRouted, resolveActiveSportsWatchset, captureMilestoneAttentionSnapshot, captureMarketOrderbookSentrySnapshot } from "../src/public-market-data.mjs";
+import { KALSHI_PUBLIC_BASE, captureEventFeeContext, captureEventFeeContextByTicker, captureMarketSnapshot, captureMilestoneEventSentrySnapshot, captureThreeWayMarketPrior, getEvent, getMarkets, getOrderbook, getGameStats, getMilestoneLiveData, getMilestones, getSportsFilters, listOpenSportsEvents, listSportsMilestones, deriveActiveSportsWatchset, describeCandlestickProbability, describeMarketObservability, describeOrderbookObservability, formThreeWayMarketPrior, getHistoricalCutoff, getHistoricalMarketCandlesticks, getMarketCandlesticks, getMarketCandlesticksRouted, resolveActiveSportsWatchset, captureMilestoneAttentionSnapshot, captureMarketOrderbookSentrySnapshot, scoutMilestonePlayByPlayChurn, selectMilestoneScoutCandidates } from "../src/public-market-data.mjs";
 const fixedClock = () => new Date("2026-10-03T19:50:00.000Z");
 
 function response(payload, status = 200) {
@@ -1205,6 +1205,191 @@ test("event-sentry capture uses only the milestone game-stats endpoint and remai
   assert.equal(result.object.gameStatsStatus, "available");
   assert.equal(result.object.gameStats.periods[0].events[0].event_type, "shot_off_target");
   assert.match(result.object.provenance.gameStats, /game_stats$/);
+});
+
+
+test("play-by-play event counting spans cumulative periods without interpreting event semantics", () => {
+  assert.equal(countPlayByPlayEvents({
+    periods: [
+      { events: [{ id: 1 }, { id: 2 }] },
+      { events: [{ id: 3 }] },
+      { events: null },
+    ],
+  }), 3);
+  assert.equal(countPlayByPlayEvents(null), 0);
+});
+
+test("bounded PBP churn scout prefers a milestone that is actually producing new events", async () => {
+  const snapshot = {
+    kind: "OpenSportsEventsSnapshot",
+    milestones: [
+      {
+        id: "quiet-game",
+        start_date: "2026-10-03T19:55:00Z",
+        details: { status: "in_progress", coverage: { deeper_play_by_play: true } },
+        related_event_tickers: ["QUIET"],
+      },
+      {
+        id: "churn-game",
+        start_date: "2026-10-03T19:54:00Z",
+        details: { status: "in_progress", coverage: { deeper_play_by_play: true } },
+        related_event_tickers: ["CHURN"],
+      },
+      {
+        id: "prestart-game",
+        start_date: "2026-10-03T20:20:00Z",
+        details: { status: "scheduled", coverage: { deeper_play_by_play: true } },
+        related_event_tickers: ["PRESTART"],
+      },
+    ],
+  };
+
+  const candidates = selectMilestoneScoutCandidates(snapshot, {
+    at: "2026-10-03T20:00:00Z",
+    maxMilestones: 2,
+  });
+  assert.deepEqual(candidates.map((item) => item.milestoneId), [
+    "churn-game",
+    "quiet-game",
+  ]);
+
+  let phase = 0;
+  const times = [
+    new Date("2026-10-03T20:00:00.000Z"),
+    new Date("2026-10-03T20:00:10.000Z"),
+  ];
+  let clockIndex = 0;
+  const scout = await scoutMilestonePlayByPlayChurn(snapshot, {
+    at: "2026-10-03T20:00:00Z",
+    maxMilestones: 2,
+    intervalMs: 10_000,
+    concurrency: 2,
+    clock: () => times[Math.min(clockIndex, times.length - 1)],
+    sleepImpl: async () => { phase = 1; clockIndex = 1; },
+    fetchImpl: async (url) => {
+      const parts = new URL(url).pathname.split("/");
+      const id = parts.at(-2);
+      if (id === "quiet-game") {
+        return response({
+          pbp: { periods: [{ events: [{ id: "q1" }, { id: "q2" }] }] },
+        });
+      }
+      if (id === "churn-game") {
+        const events = phase === 0
+          ? [{ id: "c1" }]
+          : [{ id: "c1" }, { id: "c2" }, { id: "c3" }];
+        return response({ pbp: { periods: [{ events }] } });
+      }
+      return response({}, 404);
+    },
+  });
+
+  assert.equal(scout.candidateCount, 2);
+  assert.equal(scout.gameStatsAvailableCount, 2);
+  assert.equal(scout.positiveChurnCount, 1);
+  assert.equal(scout.elapsedMs, 10_000);
+  assert.equal(scout.byMilestone["churn-game"].beforeEventCount, 1);
+  assert.equal(scout.byMilestone["churn-game"].afterEventCount, 3);
+  assert.equal(scout.byMilestone["churn-game"].eventDelta, 2);
+  assert.equal(scout.byMilestone["churn-game"].beforeObservedAt, "2026-10-03T20:00:00.000Z");
+  assert.equal(scout.byMilestone["churn-game"].afterObservedAt, "2026-10-03T20:00:10.000Z");
+  assert.equal(scout.byMilestone["churn-game"].observedIntervalMs, 10_000);
+  assert.equal(scout.byMilestone["quiet-game"].eventDelta, 0);
+  assert.equal(scout.ranked[0].milestoneId, "churn-game");
+});
+
+test("churn-guided book-validated focus spends its scarce slot on the active event stream", async () => {
+  const snapshot = {
+    kind: "OpenSportsEventsSnapshot",
+    events: [],
+    milestones: [
+      {
+        id: "quiet-game",
+        start_date: "2026-10-03T19:59:00Z",
+        details: { status: "in_progress", coverage: { deeper_play_by_play: true } },
+        related_event_tickers: ["QUIET"],
+      },
+      {
+        id: "churn-game",
+        start_date: "2026-10-03T19:58:00Z",
+        details: { status: "in_progress", coverage: { deeper_play_by_play: true } },
+        related_event_tickers: ["CHURN"],
+      },
+    ],
+  };
+
+  const milestoneScout = {
+    "quiet-game": {
+      gameStatsAvailable: true,
+      eventDelta: 0,
+      beforeEventCount: 10,
+      afterEventCount: 10,
+      elapsedMs: 10_000,
+    },
+    "churn-game": {
+      gameStatsAvailable: true,
+      eventDelta: 3,
+      beforeEventCount: 20,
+      afterEventCount: 23,
+      elapsedMs: 10_000,
+    },
+  };
+
+  const seen = [];
+  const watchset = await resolveActiveSportsWatchset(snapshot, {
+    at: "2026-10-03T20:00:10Z",
+    maxMarkets: 1,
+    maxMilestones: 2,
+    maxMarketsPerMilestone: 1,
+    selectionMode: "structured-churn-book-validated-reaction",
+    maxResearchSpreadDollars: 0.20,
+    maxBookProbes: 2,
+    milestoneScout,
+    fetchImpl: async (url) => {
+      const parsed = new URL(url);
+      seen.push(parsed.pathname + parsed.search);
+      if (parsed.pathname.endsWith("/markets")) {
+        const event = parsed.searchParams.get("event_ticker");
+        return response({
+          markets: [{
+            ticker: event + "-WIN",
+            status: "active",
+            yes_bid_dollars: "0.48",
+            no_bid_dollars: "0.48",
+            liquidity_dollars: "100",
+          }],
+          cursor: "",
+        });
+      }
+      if (parsed.pathname.endsWith("/CHURN-WIN/orderbook")) {
+        return response({
+          orderbook_fp: {
+            yes_dollars: [["0.48", "10"]],
+            no_dollars: [["0.48", "11"]],
+          },
+        });
+      }
+      if (parsed.pathname.endsWith("/QUIET-WIN/orderbook")) {
+        return response({
+          orderbook_fp: {
+            yes_dollars: [["0.48", "10"]],
+            no_dollars: [["0.48", "11"]],
+          },
+        });
+      }
+      return response({}, 404);
+    },
+  });
+
+  assert.equal(watchset.selectionPolicy.mode, "structured-churn-book-validated-reaction");
+  assert.equal(watchset.selectionPolicy.scoutApplied, true);
+  assert.equal(watchset.selectionPolicy.scoutMilestoneCount, 2);
+  assert.equal(watchset.selection[0].milestoneId, "churn-game");
+  assert.equal(watchset.selection[0].scoutEventDelta, 3);
+  assert.deepEqual(watchset.milestoneIds, ["churn-game"]);
+  assert.deepEqual(watchset.marketTickers, ["CHURN-WIN"]);
+  assert.ok(seen.some((value) => value.includes("event_ticker=CHURN")));
+  assert.ok(!seen.some((value) => value.includes("event_ticker=QUIET")));
 });
 
 

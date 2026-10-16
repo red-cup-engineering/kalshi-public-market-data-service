@@ -591,6 +591,7 @@ const WATCHSET_SELECTION_MODES = new Set([
   "structured-reaction",
   "structured-executable-reaction",
   "structured-book-validated-reaction",
+  "structured-churn-book-validated-reaction",
 ]);
 
 function playByPlayCoverageLevel(milestone) {
@@ -603,7 +604,31 @@ function playByPlayCoverageLevel(milestone) {
   return 0;
 }
 
-function milestoneAttentionDescriptor(milestone, atMs) {
+export function countPlayByPlayEvents(pbp) {
+  if (!pbp || !Array.isArray(pbp.periods)) return 0;
+  return pbp.periods.reduce(
+    (sum, period) => sum + (Array.isArray(period?.events) ? period.events.length : 0),
+    0,
+  );
+}
+
+async function mapWithConcurrency(values, concurrency, fn) {
+  const results = new Array(values.length);
+  let cursor = 0;
+  async function worker() {
+    while (true) {
+      const index = cursor++;
+      if (index >= values.length) return;
+      results[index] = await fn(values[index], index);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, Math.max(1, values.length)) }, () => worker()),
+  );
+  return results;
+}
+
+function milestoneAttentionDescriptor(milestone, atMs, scout = null) {
   const startMs = Date.parse(milestone?.start_date);
   const endMs = Date.parse(milestone?.end_date);
   const status = String(milestone?.details?.status ?? "").toLowerCase();
@@ -629,6 +654,11 @@ function milestoneAttentionDescriptor(milestone, atMs) {
     prestartStatus,
     playByPlayCoverageLevel: coverageLevel,
     reactionReadiness,
+    scoutPbpAvailable: scout?.gameStatsAvailable === true,
+    scoutEventDelta: Number.isFinite(scout?.eventDelta) ? scout.eventDelta : null,
+    scoutBeforeEventCount: Number.isFinite(scout?.beforeEventCount) ? scout.beforeEventCount : null,
+    scoutAfterEventCount: Number.isFinite(scout?.afterEventCount) ? scout.afterEventCount : null,
+    scoutIntervalMs: Number.isFinite(scout?.elapsedMs) ? scout.elapsedMs : null,
     distanceFromStartMs: Number.isFinite(startMs) ? Math.abs(startMs - atMs) : null,
   });
 }
@@ -730,9 +760,19 @@ export function describeOrderbookObservability(orderbook) {
 }
 
 function compareMilestoneAttention(left, right, selectionMode) {
+  if (selectionMode === "structured-churn-book-validated-reaction") {
+    if (left.scoutPbpAvailable !== right.scoutPbpAvailable) {
+      return left.scoutPbpAvailable ? -1 : 1;
+    }
+    const leftDelta = Number.isFinite(left.scoutEventDelta) ? left.scoutEventDelta : -1;
+    const rightDelta = Number.isFinite(right.scoutEventDelta) ? right.scoutEventDelta : -1;
+    if (leftDelta !== rightDelta) return rightDelta - leftDelta;
+  }
+
   if (selectionMode === "structured-reaction" ||
       selectionMode === "structured-executable-reaction" ||
-      selectionMode === "structured-book-validated-reaction") {
+      selectionMode === "structured-book-validated-reaction" ||
+      selectionMode === "structured-churn-book-validated-reaction") {
     if (left.reactionReadiness !== right.reactionReadiness) {
       return right.reactionReadiness - left.reactionReadiness;
     }
@@ -750,6 +790,161 @@ function compareMilestoneAttention(left, right, selectionMode) {
   return String(left.milestoneId ?? "").localeCompare(String(right.milestoneId ?? ""));
 }
 
+export function selectMilestoneScoutCandidates(snapshot, {
+  at = new Date().toISOString(),
+  prestartMinutes = 30,
+  unknownEndMaxAgeMinutes = 360,
+  maxMilestones = 18,
+} = {}) {
+  if (!snapshot || snapshot.kind !== "OpenSportsEventsSnapshot") {
+    throw new TypeError("open-sports-events-snapshot-required");
+  }
+  const atMs = Date.parse(at);
+  if (!Number.isFinite(atMs)) throw new TypeError("valid-scout-time-required");
+  if (!Number.isFinite(prestartMinutes) || prestartMinutes < 0 ||
+      !Number.isFinite(unknownEndMaxAgeMinutes) || unknownEndMaxAgeMinutes < 1 ||
+      !Number.isInteger(maxMilestones) || maxMilestones < 1 || maxMilestones > 50) {
+    throw new TypeError("valid-scout-bounds-required");
+  }
+
+  const upper = atMs + prestartMinutes * 60_000;
+  const lower = atMs - unknownEndMaxAgeMinutes * 60_000;
+
+  return Object.freeze(
+    (Array.isArray(snapshot.milestones) ? snapshot.milestones : [])
+      .filter((milestone) => {
+        const start = Date.parse(milestone.start_date);
+        const end = Date.parse(milestone.end_date);
+        if (!Number.isFinite(start) || start > upper) return false;
+        return Number.isFinite(end) ? end >= atMs : start >= lower;
+      })
+      .map((milestone) => Object.freeze({
+        milestoneId: milestone.id,
+        attention: milestoneAttentionDescriptor(milestone, atMs),
+      }))
+      .sort((a, b) =>
+        compareMilestoneAttention(a.attention, b.attention, "structured-reaction"))
+      .slice(0, maxMilestones),
+  );
+}
+
+export async function scoutMilestonePlayByPlayChurn(snapshot, {
+  at = new Date().toISOString(),
+  prestartMinutes = 30,
+  unknownEndMaxAgeMinutes = 360,
+  maxMilestones = 18,
+  intervalMs = 10_000,
+  concurrency = 4,
+  fetchImpl,
+  clock = () => new Date(),
+  sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+} = {}) {
+  if (!Number.isInteger(intervalMs) || intervalMs < 1_000 || intervalMs > 60_000 ||
+      !Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8 ||
+      typeof sleepImpl !== "function" || typeof clock !== "function") {
+    throw new TypeError("valid-pbp-churn-scout-policy-required");
+  }
+
+  const candidates = selectMilestoneScoutCandidates(snapshot, {
+    at,
+    prestartMinutes,
+    unknownEndMaxAgeMinutes,
+    maxMilestones,
+  });
+
+  const firstObservedAt = clock().toISOString();
+  const first = await mapWithConcurrency(candidates, concurrency, async ({ milestoneId: id }) => ({
+    id,
+    result: await captureMilestoneEventSentrySnapshot(id, { fetchImpl, clock }),
+  }));
+
+  await sleepImpl(intervalMs);
+
+  const secondObservedAt = clock().toISOString();
+  const second = await mapWithConcurrency(candidates, concurrency, async ({ milestoneId: id }) => ({
+    id,
+    result: await captureMilestoneEventSentrySnapshot(id, { fetchImpl, clock }),
+  }));
+
+  const firstById = new Map(first.map((item) => [item.id, item.result]));
+  const secondById = new Map(second.map((item) => [item.id, item.result]));
+  const firstMs = Date.parse(firstObservedAt);
+  const secondMs = Date.parse(secondObservedAt);
+  const elapsedMs = Number.isFinite(firstMs) && Number.isFinite(secondMs)
+    ? Math.max(0, secondMs - firstMs)
+    : intervalMs;
+
+  const rows = candidates.map(({ milestoneId: id, attention }) => {
+    const before = firstById.get(id);
+    const after = secondById.get(id);
+    const beforePbp = before?.type === "Accept" ? before.object?.gameStats : null;
+    const afterPbp = after?.type === "Accept" ? after.object?.gameStats : null;
+    const beforeAvailable = before?.type === "Accept" && before.object?.gameStatsStatus === "available";
+    const afterAvailable = after?.type === "Accept" && after.object?.gameStatsStatus === "available";
+    const beforeEventCount = beforeAvailable ? countPlayByPlayEvents(beforePbp) : null;
+    const afterEventCount = afterAvailable ? countPlayByPlayEvents(afterPbp) : null;
+    const gameStatsAvailable = Number.isFinite(beforeEventCount) && Number.isFinite(afterEventCount);
+    const rawDelta = gameStatsAvailable ? afterEventCount - beforeEventCount : null;
+    const beforeObservedAt = before?.type === "Accept" ? before.object?.observedAt ?? null : null;
+    const afterObservedAt = after?.type === "Accept" ? after.object?.observedAt ?? null : null;
+    const beforeObservedMs = Date.parse(beforeObservedAt);
+    const afterObservedMs = Date.parse(afterObservedAt);
+    const observedIntervalMs =
+      Number.isFinite(beforeObservedMs) && Number.isFinite(afterObservedMs)
+        ? Math.max(0, afterObservedMs - beforeObservedMs)
+        : null;
+
+    return Object.freeze({
+      milestoneId: id,
+      gameStatsAvailable,
+      beforeEventCount,
+      afterEventCount,
+      eventDelta: Number.isFinite(rawDelta) ? Math.max(0, rawDelta) : null,
+      cumulativeCountResetObserved: Number.isFinite(rawDelta) && rawDelta < 0,
+      requestedIntervalMs: intervalMs,
+      elapsedMs,
+      beforeObservedAt,
+      afterObservedAt,
+      observedIntervalMs,
+      firstObservedAt,
+      secondObservedAt,
+      firstSource: before?.type === "Accept" ? before.object?.provenance?.gameStats ?? null : null,
+      secondSource: after?.type === "Accept" ? after.object?.provenance?.gameStats ?? null : null,
+      firstRejectCode: before?.type === "Reject" ? before.code : null,
+      secondRejectCode: after?.type === "Reject" ? after.code : null,
+      reactionReadiness: attention.reactionReadiness,
+      playByPlayCoverageLevel: attention.playByPlayCoverageLevel,
+    });
+  });
+
+  const ranked = [...rows].sort((left, right) => {
+    if (left.gameStatsAvailable !== right.gameStatsAvailable) {
+      return left.gameStatsAvailable ? -1 : 1;
+    }
+    const leftDelta = Number.isFinite(left.eventDelta) ? left.eventDelta : -1;
+    const rightDelta = Number.isFinite(right.eventDelta) ? right.eventDelta : -1;
+    if (leftDelta !== rightDelta) return rightDelta - leftDelta;
+    if (left.reactionReadiness !== right.reactionReadiness) {
+      return right.reactionReadiness - left.reactionReadiness;
+    }
+    return left.milestoneId.localeCompare(right.milestoneId);
+  });
+
+  return Object.freeze({
+    type: "MilestonePlayByPlayChurnScout",
+    at,
+    requestedIntervalMs: intervalMs,
+    elapsedMs,
+    firstObservedAt,
+    secondObservedAt,
+    candidateCount: candidates.length,
+    gameStatsAvailableCount: rows.filter((row) => row.gameStatsAvailable).length,
+    positiveChurnCount: rows.filter((row) => Number.isFinite(row.eventDelta) && row.eventDelta > 0).length,
+    ranked: Object.freeze(ranked),
+    byMilestone: Object.freeze(Object.fromEntries(rows.map((row) => [row.milestoneId, row]))),
+  });
+}
+
 export async function resolveActiveSportsWatchset(snapshot, {
   at = new Date().toISOString(),
   prestartMinutes = 30,
@@ -760,6 +955,7 @@ export async function resolveActiveSportsWatchset(snapshot, {
   selectionMode = "temporal",
   maxResearchSpreadDollars = 0.20,
   maxBookProbes = Math.min(maxMarkets * 2, 100),
+  milestoneScout = null,
   fetchImpl,
   clock,
 } = {}) {
@@ -797,7 +993,11 @@ export async function resolveActiveSportsWatchset(snapshot, {
     })
     .map((milestone) => Object.freeze({
       milestone,
-      attention: milestoneAttentionDescriptor(milestone, atMs),
+      attention: milestoneAttentionDescriptor(
+        milestone,
+        atMs,
+        milestoneScout?.[milestone.id] ?? null,
+      ),
     }))
     .sort((a, b) => compareMilestoneAttention(a.attention, b.attention, selectionMode));
 
@@ -825,7 +1025,8 @@ export async function resolveActiveSportsWatchset(snapshot, {
       const milestoneRemaining = maxMarketsPerMilestone - milestoneMarketCount;
       if (globalRemaining <= 0 || milestoneRemaining <= 0) break;
 
-      const candidateLimit = selectionMode === "structured-book-validated-reaction"
+      const candidateLimit = (selectionMode === "structured-book-validated-reaction" ||
+        selectionMode === "structured-churn-book-validated-reaction")
         ? Math.min(
           100,
           Math.max(globalRemaining, milestoneRemaining * 3),
@@ -855,7 +1056,8 @@ export async function resolveActiveSportsWatchset(snapshot, {
         .filter((market) => TRADABLE_MARKET_STATUS.has(market?.status) && nonEmpty(market?.ticker));
       const observabilityRanked = (selectionMode === "structured-reaction" ||
         selectionMode === "structured-executable-reaction" ||
-        selectionMode === "structured-book-validated-reaction");
+        selectionMode === "structured-book-validated-reaction" ||
+        selectionMode === "structured-churn-book-validated-reaction");
       const rankedMarkets = observabilityRanked
         ? openMarkets
           .map((market) => Object.freeze({
@@ -869,7 +1071,8 @@ export async function resolveActiveSportsWatchset(snapshot, {
         }));
       const openTickers = rankedMarkets.map((entry) => entry.market.ticker);
       const summaryGated = (selectionMode === "structured-executable-reaction" ||
-        selectionMode === "structured-book-validated-reaction");
+        selectionMode === "structured-book-validated-reaction" ||
+        selectionMode === "structured-churn-book-validated-reaction");
       const eligibleRankedMarkets = summaryGated
         ? rankedMarkets.filter((entry) =>
           entry.observability.twoSided &&
@@ -881,7 +1084,8 @@ export async function resolveActiveSportsWatchset(snapshot, {
 
       const bookProbes = [];
       let validatedRankedMarkets = eligibleRankedMarkets;
-      if (selectionMode === "structured-book-validated-reaction") {
+      if (selectionMode === "structured-book-validated-reaction" ||
+          selectionMode === "structured-churn-book-validated-reaction") {
         validatedRankedMarkets = [];
         const needed = Math.min(globalRemaining, milestoneRemaining);
 
@@ -1000,6 +1204,10 @@ export async function resolveActiveSportsWatchset(snapshot, {
       unknownEndMaxAgeMinutes,
       maxResearchSpreadDollars,
       maxBookProbes,
+      scoutApplied: selectionMode === "structured-churn-book-validated-reaction",
+      scoutMilestoneCount: milestoneScout && typeof milestoneScout === "object"
+        ? Object.keys(milestoneScout).length
+        : 0,
     }),
     milestoneIds: Object.freeze(admittedMilestoneIds),
     eventTickers: Object.freeze([...eventTickers]),
