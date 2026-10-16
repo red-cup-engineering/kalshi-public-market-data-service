@@ -1,0 +1,31 @@
+{
+  "name": "@red-cup-engineering/kalshi-public-market-data-service",
+  "version": "0.11.0",
+  "private": true,
+  "type": "module",
+  "description": "Red Cup Financial Engineering market-data provider: bounded credential-free Kalshi public acquisition, event/milestone observation, sourced tapes and native original regression corpus.",
+  "exports": {
+    ".": "./src/public-market-data.mjs",
+    "./research-tape": "./src/research-tape.mjs",
+    "./capture-layout": "./src/capture-layout.mjs",
+    "./tape-audit": "./src/tape-audit.mjs"
+  },
+  "scripts": {
+    "check": "node --check src/public-market-data.mjs && node --check src/research-tape.mjs && node --check src/capture-layout.mjs && node --check src/tape-audit.mjs && node --check bin/capture-open-sports.mjs && node --check bin/capture-market.mjs && node --check bin/capture-milestone.mjs && node --check bin/capture-tape.mjs && node --check bin/capture-poll.mjs && node --check bin/capture-active-sports.mjs && node --check bin/capture-active-sports-cycle.mjs && node --check bin/audit-tape.mjs && node --check bin/refresh-active-sports-watchset.mjs && node --check bin/capture-watchset-sample.mjs && node --check bin/capture-watchset-event-sentry.mjs && node --check bin/capture-watchset-markets.mjs && node --test test/*.test.mjs",
+    "capture:sports": "node bin/capture-open-sports.mjs"
+  },
+  "bin": {
+    "kalshi-capture-open-sports": "./bin/capture-open-sports.mjs",
+    "kalshi-capture-market": "./bin/capture-market.mjs",
+    "kalshi-capture-milestone": "./bin/capture-milestone.mjs",
+    "kalshi-capture-tape": "./bin/capture-tape.mjs",
+    "kalshi-capture-poll": "./bin/capture-poll.mjs",
+    "kalshi-capture-active-sports": "./bin/capture-active-sports.mjs",
+    "kalshi-capture-active-sports-cycle": "./bin/capture-active-sports-cycle.mjs",
+    "kalshi-audit-tape": "./bin/audit-tape.mjs",
+    "kalshi-refresh-active-sports-watchset": "./bin/refresh-active-sports-watchset.mjs",
+    "kalshi-capture-watchset-sample": "./bin/capture-watchset-sample.mjs",
+    "kalshi-capture-watchset-event-sentry": "./bin/capture-watchset-event-sentry.mjs",
+    "kalshi-capture-watchset-markets": "./bin/capture-watchset-markets.mjs"
+  }
+}
