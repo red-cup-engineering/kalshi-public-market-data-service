@@ -95,7 +95,9 @@ if (selectionMode === "structured-churn-book-validated-reaction") {
     intervalMs: scoutIntervalMs,
     concurrency: scoutConcurrency,
   });
-  focusAt = scout.secondObservedAt ?? at;
+  // The right endpoint is completion of the second reads, never the start.
+  // Quoting the watchset from an earlier instant would introduce lookahead.
+  focusAt = scout.scoutCompletedAt;
 
   await appendTapeRecord(tapePath, formTapeRecord({
     recordType: "pbp-churn-scout",
@@ -158,7 +160,7 @@ if (!skipFeeContext) {
     await appendTapeRecord(tapePath, formTapeRecord({
       recordType: "fee-context",
       payload,
-      capturedAt: payload?.observedAt ?? payload?.retrievedAt ?? at,
+      capturedAt: payload?.observedAt ?? payload?.retrievedAt ?? focusAt,
     }));
   }
 }

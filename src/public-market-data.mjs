@@ -852,11 +852,13 @@ export async function scoutMilestonePlayByPlayChurn(snapshot, {
     maxMilestones,
   });
 
-  const firstObservedAt = clock().toISOString();
+  const scoutStartedAt = clock().toISOString();
+  const firstObservedAt = scoutStartedAt;
   const first = await mapWithConcurrency(candidates, concurrency, async ({ milestoneId: id }) => ({
     id,
     result: await captureMilestoneEventSentrySnapshot(id, { fetchImpl, clock }),
   }));
+  const firstBatchCompletedAt = clock().toISOString();
 
   await sleepImpl(intervalMs);
 
@@ -866,12 +868,16 @@ export async function scoutMilestonePlayByPlayChurn(snapshot, {
     result: await captureMilestoneEventSentrySnapshot(id, { fetchImpl, clock }),
   }));
 
+  const scoutCompletedAt = clock().toISOString();
+
   const firstById = new Map(first.map((item) => [item.id, item.result]));
   const secondById = new Map(second.map((item) => [item.id, item.result]));
-  const firstMs = Date.parse(firstObservedAt);
-  const secondMs = Date.parse(secondObservedAt);
-  const elapsedMs = Number.isFinite(firstMs) && Number.isFinite(secondMs)
-    ? Math.max(0, secondMs - firstMs)
+  // Actual complete scout duration includes both bounded read passes. The
+  // timing origin of the focus decision is AFTER all second reads finish.
+  const startMs = Date.parse(scoutStartedAt);
+  const completedMs = Date.parse(scoutCompletedAt);
+  const elapsedMs = Number.isFinite(startMs) && Number.isFinite(completedMs)
+    ? Math.max(0, completedMs - startMs)
     : intervalMs;
 
   const rows = candidates.map(({ milestoneId: id, attention }) => {
@@ -935,6 +941,9 @@ export async function scoutMilestonePlayByPlayChurn(snapshot, {
     at,
     requestedIntervalMs: intervalMs,
     elapsedMs,
+    scoutStartedAt,
+    firstBatchCompletedAt,
+    scoutCompletedAt,
     firstObservedAt,
     secondObservedAt,
     candidateCount: candidates.length,

@@ -1288,6 +1288,11 @@ test("bounded PBP churn scout prefers a milestone that is actually producing new
   assert.equal(scout.gameStatsAvailableCount, 2);
   assert.equal(scout.positiveChurnCount, 1);
   assert.equal(scout.elapsedMs, 10_000);
+  // Original alternative legacy PR #223: quote after the whole second pass,
+  // never backdate watchset selection to the start of that pass.
+  assert.equal(scout.scoutStartedAt, "2026-10-03T20:00:00.000Z");
+  assert.equal(scout.firstBatchCompletedAt, "2026-10-03T20:00:00.000Z");
+  assert.equal(scout.scoutCompletedAt, "2026-10-03T20:00:10.000Z");
   assert.equal(scout.byMilestone["churn-game"].beforeEventCount, 1);
   assert.equal(scout.byMilestone["churn-game"].afterEventCount, 3);
   assert.equal(scout.byMilestone["churn-game"].eventDelta, 2);
