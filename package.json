@@ -31,5 +31,9 @@
     "kalshi-capture-watchset-markets": "./bin/capture-watchset-markets.mjs",
     "kalshi-capture-watchset-orderbook-sentry": "./bin/capture-watchset-orderbook-sentry.mjs",
     "kalshi-capture-watchset-milestones": "./bin/capture-watchset-milestones.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/red-cup-engineering/kalshi-public-market-data-service.git"
   }
 }
