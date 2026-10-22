@@ -35,5 +35,10 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/red-cup-engineering/kalshi-public-market-data-service.git"
+  },
+  "license": "MIT",
+  "funding": {
+    "type": "individual",
+    "url": "https://github.com/561-group/.github/blob/main/TIPS.md"
   }
 }
