@@ -104,6 +104,7 @@ for (const item of results) {
   await appendTapeRecord(tapePath, formTapeRecord({
     recordType: item.task.recordType,
     payload,
+    attention: item.result.attention ?? null,
     capturedAt,
   }));
   accepted += 1;
