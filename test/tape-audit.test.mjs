@@ -69,3 +69,20 @@ test("orderbook sentry streams receive independent cadence audits", () => {
   assert.equal(full.samples, 1);
   assert.equal(full.medianIntervalMs, null);
 });
+
+test("audit counts observed HTTP work and never calls missing metering free", () => {
+  const base={transport:"rest",requestCount:1,durationMs:2,payloadBytesEstimate:9,status:200,outcome:"accept"};
+  const metered=formTapeRecord({recordType:"market",capturedAt:"2026-10-03T20:01:00Z",
+    payload:{ticker:"A"},
+    attention:{requestCount:3,wallDurationMs:3,summedRequestDurationMs:6,
+      payloadBytesEstimate:27,components:{market:base,orderbook:base,trades:base}}});
+  const old=record("market","2026-10-03T20:02:00Z",{ticker:"A"});
+  const a=auditResearchTape([metered,old]);
+  assert.equal(a.meteredRecordCount,1);
+  assert.equal(a.unmeteredRecordCount,1);
+  assert.equal(a.meteredRecordedRequests,3);
+  assert.equal(a.meteredResponseBytesEstimate,27);
+  assert.equal(a.providerCashCost,null);
+  assert.throws(()=>auditResearchTape([{...old,attention:{requestCount:0,payloadBytesEstimate:9}}]),
+    /invalid-recorded-provider-attention/);
+});

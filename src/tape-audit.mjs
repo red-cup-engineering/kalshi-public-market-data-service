@@ -26,6 +26,7 @@ export function auditResearchTape(records, {
   const times = [];
   const streams = new Map();
   let credentialSafe = true;
+  let meteredRecordCount = 0, meteredRecordedRequests = 0, meteredResponseBytes = 0;
 
   for (const record of records) {
     if (!record || record.type !== "KalshiResearchTapeRecord" || !finiteTime(record.capturedAt)) {
@@ -51,6 +52,17 @@ export function auditResearchTape(records, {
       streams.get(streamKey).push(ms);
     }
 
+    // Count only source-recorded HTTP work, never an inferred provider bill.
+    // Refusals emitted to stderr may incur further calls not represented here.
+    if (record.attention !== undefined) {
+      const a = record.attention;
+      if (!a || !Number.isSafeInteger(a.requestCount) || a.requestCount < 1 ||
+          !Number.isSafeInteger(a.payloadBytesEstimate) || a.payloadBytesEstimate < 0)
+        throw new TypeError("invalid-recorded-provider-attention");
+      meteredRecordCount++;
+      meteredRecordedRequests += a.requestCount;
+      meteredResponseBytes += a.payloadBytesEstimate;
+    }
     const serialized = JSON.stringify(record);
     if (/(private.?key|access.?signature|authorization|api.?key)/i.test(serialized)) {
       credentialSafe = false;
@@ -92,6 +104,13 @@ export function auditResearchTape(records, {
     streamCount: streamReports.length,
     longGapCount,
     credentialSafe,
+    meteredRecordCount,
+    unmeteredRecordCount: records.length - meteredRecordCount,
+    meteredRecordedRequests,
+    meteredResponseBytesEstimate: meteredResponseBytes,
+    // Cash and physical energy remain unknown; successful tape records do not
+    // enumerate separate rejected polls or actual supplier billing.
+    providerCashCost: null,
     streams: Object.freeze(streamReports),
   });
 }

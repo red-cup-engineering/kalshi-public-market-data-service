@@ -31,6 +31,7 @@ function assayNoCredentialMaterial(value, path = "$") {
 export function formTapeRecord({
   recordType,
   payload,
+  attention = null,
   capturedAt = new Date().toISOString(),
   source = "kalshi-public-market-data-service",
 } = {}) {
@@ -38,6 +39,26 @@ export function formTapeRecord({
   if (!payload || typeof payload !== "object") throw new TypeError("tape-record-payload-required");
   if (!Number.isFinite(Date.parse(capturedAt))) throw new TypeError("valid-tape-capture-time-required");
   assayNoCredentialMaterial(payload);
+  if (attention !== null) {
+    if (!attention || typeof attention !== "object" || Array.isArray(attention) ||
+        !Number.isInteger(attention.requestCount) || attention.requestCount < 1 ||
+        !Number.isFinite(attention.wallDurationMs) || attention.wallDurationMs < 0 ||
+        !Number.isFinite(attention.summedRequestDurationMs) || attention.summedRequestDurationMs < 0 ||
+        !Number.isSafeInteger(attention.payloadBytesEstimate) || attention.payloadBytesEstimate < 0 ||
+        !attention.components || typeof attention.components !== "object" ||
+        Object.keys(attention.components).length < 1 ||
+        Object.keys(attention.components).length > 8)
+      throw new TypeError("bounded-transport-attention-required");
+    const components = Object.values(attention.components);
+    if (components.some(row => !row || row.transport !== "rest" ||
+        row.requestCount !== 1 || !Number.isFinite(row.durationMs) || row.durationMs < 0 ||
+        !Number.isSafeInteger(row.payloadBytesEstimate) || row.payloadBytesEstimate < 0 ||
+        !["accept", "http-reject", "network-error"].includes(row.outcome)) ||
+        components.length !== attention.requestCount ||
+        components.reduce((sum,row)=>sum + row.payloadBytesEstimate,0) !== attention.payloadBytesEstimate)
+      throw new TypeError("incoherent-transport-attention-components");
+    assayNoCredentialMaterial(attention);
+  }
 
   const body = {
     type: "KalshiResearchTapeRecord",
@@ -46,6 +67,7 @@ export function formTapeRecord({
     source,
     capturedAt,
     payload,
+    ...(attention === null ? {} : { attention }),
   };
   return Object.freeze({
     id: semanticId(body),

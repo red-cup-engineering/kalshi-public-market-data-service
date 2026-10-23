@@ -36,7 +36,7 @@ async function admit(recordType, result) {
   }
   const payload = result.object;
   const capturedAt = payload?.observedAt ?? payload?.retrievedAt ?? new Date().toISOString();
-  const record = formTapeRecord({ recordType, payload, capturedAt });
+  const record = formTapeRecord({ recordType, payload, capturedAt, attention: result.attention ?? null });
   await appendTapeRecord(out, record);
   process.stdout.write(JSON.stringify({ type: "Recorded", id: record.id, recordType, out }) + "\n");
 }
