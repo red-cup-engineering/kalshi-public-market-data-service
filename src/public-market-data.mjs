@@ -56,6 +56,19 @@ async function publicGet(path, params = new URLSearchParams(), {
 
   const url = new URL(KALSHI_PUBLIC_BASE + path);
   for (const [key, value] of params) url.searchParams.append(key, value);
+  const startedAtMs = performance.now();
+
+  const formAttention = ({ payload = null, status = null, outcome }) => Object.freeze({
+    transport: "rest",
+    requestCount: 1,
+    durationMs: Math.max(0, performance.now() - startedAtMs),
+    payloadBytesEstimate: payload === null
+      ? 0
+      : Buffer.byteLength(JSON.stringify(payload), "utf8"),
+    status,
+    outcome,
+  });
+
 
   let response;
   try {
@@ -70,6 +83,7 @@ async function publicGet(path, params = new URLSearchParams(), {
       code: "network-error",
       detail: error instanceof Error ? error.message : String(error),
       venueWrite: false,
+      attention: formAttention({outcome:"network-error"}),
     });
   }
 
@@ -80,6 +94,7 @@ async function publicGet(path, params = new URLSearchParams(), {
       code: `http-${response.status}`,
       detail: payload?.message ?? payload?.error?.message ?? response.statusText,
       venueWrite: false,
+      attention: formAttention({payload, status:response.status, outcome:'http-reject'}),
     });
   }
 
@@ -88,6 +103,34 @@ async function publicGet(path, params = new URLSearchParams(), {
     source: url.toString(),
     retrievedAt: clock().toISOString(),
     object: payload,
+    attention: formAttention({payload, status:response.status, outcome:'accept'}),
+  });
+}
+
+
+function aggregateAttention(components, wallDurationMs) {
+  const entries = Object.entries(components)
+    .filter(([, result]) => result?.attention && typeof result.attention === "object");
+  const requestCount = entries.reduce(
+    (sum, [, result]) => sum + Number(result.attention.requestCount ?? 0),
+    0,
+  );
+  const summedRequestDurationMs = entries.reduce(
+    (sum, [, result]) => sum + Number(result.attention.durationMs ?? 0),
+    0,
+  );
+  const payloadBytesEstimate = entries.reduce(
+    (sum, [, result]) => sum + Number(result.attention.payloadBytesEstimate ?? 0),
+    0,
+  );
+  return Object.freeze({
+    requestCount,
+    wallDurationMs: Math.max(0, wallDurationMs),
+    summedRequestDurationMs,
+    payloadBytesEstimate,
+    components: Object.freeze(Object.fromEntries(
+      entries.map(([name, result]) => [name, result.attention]),
+    )),
   });
 }
 
@@ -369,11 +412,13 @@ export async function captureMarketSnapshot(marketTicker, {
   clock,
 } = {}) {
   const t = ticker(marketTicker);
+  const startedAtMs = performance.now();
   const [market, orderbook, trades] = await Promise.all([
     getMarket(t, { fetchImpl, clock }),
     getOrderbook(t, { fetchImpl, clock }),
     getTrades({ marketTicker: t, limit: tradeLimit, fetchImpl, clock }),
   ]);
+  const attention = aggregateAttention({market,orderbook,trades}, performance.now() - startedAtMs);
   const failures = [market, orderbook, trades].filter((result) => result.type !== "Accept");
   if (failures.length > 0) {
     return Object.freeze({
@@ -381,6 +426,7 @@ export async function captureMarketSnapshot(marketTicker, {
       code: "incomplete-market-snapshot",
       failures: Object.freeze(failures),
       venueWrite: false,
+      attention,
     });
   }
 
@@ -407,7 +453,7 @@ export async function captureMarketSnapshot(marketTicker, {
       trades: trades.source,
     }),
   });
-  return Object.freeze({ type: "Accept", id: semanticId(body), object: body });
+  return Object.freeze({ type: "Accept", id: semanticId(body), object: body, attention });
 }
 
 
@@ -478,6 +524,7 @@ export async function captureMilestoneAttentionSnapshot(id, {
   clock,
 } = {}) {
   const mid = milestoneId(id);
+  const startedAtMs = performance.now();
   const live = await getMilestoneLiveData(mid, {
     includePlayerStats,
     fetchImpl,
@@ -493,6 +540,7 @@ export async function captureMilestoneAttentionSnapshot(id, {
     live,
     ...(gameStats?.type === "Accept" ? [gameStats] : []),
   ];
+  const attention = aggregateAttention({liveData:live,gameStats}, performance.now() - startedAtMs);
   const observedAt = latestRetrievedAt(acceptedComponents);
   const body = Object.freeze({
     provider: "Kalshi",
@@ -522,6 +570,7 @@ export async function captureMilestoneAttentionSnapshot(id, {
     type: "Accept",
     id: semanticId(body),
     object: body,
+    attention,
   });
 }
 
